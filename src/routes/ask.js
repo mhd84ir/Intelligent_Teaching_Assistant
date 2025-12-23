@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { askQuestion } = require('../services/ragService');
+const { logQuestion } = require('./admin');
 
 /**
  * POST /api/ask
@@ -20,6 +21,8 @@ const { askQuestion } = require('../services/ragService');
  * }
  */
 router.post('/', async (req, res) => {
+  const startTime = Date.now();
+  
   try {
     const { question } = req.body;
     
@@ -43,7 +46,11 @@ router.post('/', async (req, res) => {
     // Get answer from RAG service
     const result = await askQuestion(question.trim());
     
-    console.log(`✅ Generated answer with ${result.citations.length} citation(s) [confidence: ${result.confidence}]`);
+    const responseTime = Date.now() - startTime;
+    console.log(`✅ Generated answer with ${result.citations.length} citation(s) [confidence: ${result.confidence}] in ${responseTime}ms`);
+    
+    // Log the question for admin panel
+    logQuestion(question.trim(), responseTime, result.confidence, result.citations);
     
     res.json({
       success: true,
