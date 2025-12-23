@@ -10,6 +10,17 @@ const answerText = document.getElementById('answerText');
 const citationsList = document.getElementById('citationsList');
 const similarityList = document.getElementById('similarityList');
 const errorMessage = document.getElementById('errorMessage');
+const confidenceBadge = document.getElementById('confidenceBadge');
+const warningsSection = document.getElementById('warningsSection');
+const warningsList = document.getElementById('warningsList');
+
+// Confidence level labels and colors
+const confidenceLabels = {
+    high: { text: 'بالا / High', class: 'confidence-high' },
+    medium: { text: 'متوسط / Medium', class: 'confidence-medium' },
+    low: { text: 'پایین / Low', class: 'confidence-low' },
+    none: { text: 'یافت نشد / Not Found', class: 'confidence-none' }
+};
 
 /**
  * Main function to ask a question
@@ -65,6 +76,26 @@ async function askQuestion() {
 function displayAnswer(data) {
     // Show answer text
     answerText.textContent = data.answer;
+
+    // Show confidence badge
+    const confidence = data.confidence || 'low';
+    const confInfo = confidenceLabels[confidence] || confidenceLabels.low;
+    confidenceBadge.textContent = confInfo.text;
+    confidenceBadge.className = `confidence-badge ${confInfo.class}`;
+
+    // Show warnings if any
+    warningsList.innerHTML = '';
+    if (data.warnings && data.warnings.length > 0) {
+        data.warnings.forEach(warning => {
+            const warningDiv = document.createElement('div');
+            warningDiv.className = 'warning-item';
+            warningDiv.textContent = warning;
+            warningsList.appendChild(warningDiv);
+        });
+        warningsSection.classList.add('visible');
+    } else {
+        warningsSection.classList.remove('visible');
+    }
 
     // Show citations
     citationsList.innerHTML = '';

@@ -193,6 +193,72 @@
             font-weight: 500;
         }
 
+        /* Confidence indicator */
+        .confidence-section {
+            margin-top: 15px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .confidence-label {
+            font-weight: 600;
+            color: #666;
+            font-size: 0.95rem;
+        }
+
+        .confidence-badge {
+            padding: 6px 14px;
+            border-radius: 15px;
+            font-size: 0.85rem;
+            font-weight: 600;
+        }
+
+        .confidence-high {
+            background: #c6f6d5;
+            color: #276749;
+        }
+
+        .confidence-medium {
+            background: #fefcbf;
+            color: #975a16;
+        }
+
+        .confidence-low {
+            background: #fed7d7;
+            color: #c53030;
+        }
+
+        .confidence-none {
+            background: #e2e8f0;
+            color: #4a5568;
+        }
+
+        /* Warnings section */
+        .warnings-section {
+            margin-top: 15px;
+            display: none;
+        }
+
+        .warnings-section.visible {
+            display: block;
+        }
+
+        .warning-item {
+            background: #fffaf0;
+            color: #c05621;
+            padding: 10px 15px;
+            border-radius: 8px;
+            border-right: 3px solid #ed8936;
+            margin-bottom: 8px;
+            font-size: 0.9rem;
+        }
+
+        body.ltr .warning-item {
+            border-right: none;
+            border-left: 3px solid #ed8936;
+        }
+
         /* Error message */
         .error-message {
             display: none;
@@ -301,6 +367,16 @@
                     <span>پاسخ:</span>
                 </div>
                 <div id="answerText" class="answer-text"></div>
+
+                <div class="confidence-section">
+                    <span class="confidence-label">📊 اطمینان / Confidence:</span>
+                    <span id="confidenceBadge" class="confidence-badge"></span>
+                </div>
+
+                <div id="warningsSection" class="warnings-section">
+                    <div class="warnings-label">⚠️ هشدارها / Warnings:</div>
+                    <div id="warningsList"></div>
+                </div>
 
                 <div class="citations-section">
                     <div class="citations-label">📚 منابع استفاده شده:</div>

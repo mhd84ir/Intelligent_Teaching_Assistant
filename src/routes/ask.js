@@ -43,13 +43,15 @@ router.post('/', async (req, res) => {
     // Get answer from RAG service
     const result = await askQuestion(question.trim());
     
-    console.log(`✅ Generated answer with ${result.citations.length} citation(s)`);
+    console.log(`✅ Generated answer with ${result.citations.length} citation(s) [confidence: ${result.confidence}]`);
     
     res.json({
       success: true,
       question: question.trim(),
       answer: result.answer,
       citations: result.citations,
+      confidence: result.confidence,
+      warnings: result.warnings,
       relevantSlides: result.relevantSlides
     });
     

@@ -1,6 +1,6 @@
 require('dotenv').config();
 const OpenAI = require('openai');
-const { getEmbedding, findSimilarSlides, loadVectorStore } = require('./embeddingService');
+const { getEmbedding, findSimilarSlides, loadVectorStore, cosineSimilarity } = require('./embeddingService');
 
 // Configuration from environment
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -14,15 +14,32 @@ if (OPENAI_BASE_URL) {
 }
 const openai = new OpenAI(config);
 
-// System prompt for the teaching assistant
-const SYSTEM_PROMPT = `You are a teaching assistant. Answer the student's question based ONLY on the provided slides. 
+// System prompt for the teaching assistant with structured output
+const SYSTEM_PROMPT = `You are a teaching assistant. Answer the student's question based ONLY on the provided slides.
 
-IMPORTANT RULES:
-1. If the answer is not in the slides, say "I cannot answer based on the provided material."
-2. Always cite the slide number(s) you used at the end of your answer in the format: [Slide X] or [Slides X, Y]
-3. Answer in the same language as the question (if the question is in Persian/Farsi, answer in Persian; if in English, answer in English)
-4. Be concise but thorough.
-5. Do not make up information that is not in the slides.`;
+You MUST respond with a valid JSON object in this exact format:
+{
+  "answer": "Your answer here",
+  "citations": [1, 2],
+  "confidence": "high"
+}
+
+RULES:
+1. "answer": Answer the question based ONLY on the slides. If the answer is not in the slides, say "I cannot answer based on the provided material."
+2. "citations": Array of slide numbers you used (e.g., [1, 2]). Empty array [] if no slides were used.
+3. "confidence": 
+   - "high": Answer is directly stated in the slides with clear evidence
+   - "medium": Answer is inferred from slide content but not explicitly stated
+   - "low": Answer is loosely related to slides, requires interpretation
+   - "none": Answer cannot be found in the slides
+
+ADDITIONAL RULES:
+- Answer in the SAME language as the question (Persian question → Persian answer, English question → English answer)
+- Be concise but thorough
+- Do NOT make up information not in the slides
+- Do NOT include markdown formatting or code blocks, just the raw JSON
+
+RESPOND WITH ONLY THE JSON OBJECT, NO OTHER TEXT.`;
 
 /**
  * Retrieve relevant slides for a query
@@ -52,48 +69,125 @@ function buildContext(slides) {
 }
 
 /**
- * Extract citations from the answer text
- * @param {string} answer - The model's answer
- * @param {Array<{slideNumber: number}>} relevantSlides - The slides that were provided
- * @returns {number[]} - Array of slide numbers cited
+ * Validate citations by checking if answer content appears in cited slides
+ * @param {string} answer - The generated answer
+ * @param {number[]} citations - Array of cited slide numbers
+ * @param {Array<{slideNumber: number, text: string}>} relevantSlides - The slides provided
+ * @returns {{validatedCitations: number[], warnings: string[]}}
  */
-function extractCitations(answer, relevantSlides) {
-  const citations = new Set();
+function validateCitations(answer, citations, relevantSlides) {
+  const validatedCitations = [];
+  const warnings = [];
   
-  // Match patterns like [Slide 1], [Slides 1, 2], (Slide 1), Slide 1:, etc.
-  const patterns = [
-    /\[Slides?\s*([\d,\s]+)\]/gi,
-    /\(Slides?\s*([\d,\s]+)\)/gi,
-    /Slides?\s*([\d,\s]+):/gi,
-    /اسلاید\s*([\d,\s]+)/gi,  // Persian: اسلاید
-  ];
+  // Create a map of slide number to text
+  const slideMap = new Map();
+  relevantSlides.forEach(slide => {
+    slideMap.set(slide.slideNumber, slide.text.toLowerCase());
+  });
   
-  for (const pattern of patterns) {
-    let match;
-    while ((match = pattern.exec(answer)) !== null) {
-      const numbers = match[1].split(/[,\s]+/).filter(n => n.trim());
-      numbers.forEach(num => {
-        const slideNum = parseInt(num.trim(), 10);
-        if (!isNaN(slideNum)) {
-          citations.add(slideNum);
-        }
-      });
+  // Extract key terms from the answer (words longer than 4 chars)
+  const answerLower = answer.toLowerCase();
+  const answerWords = answerLower
+    .split(/[\s,.;:!?()[\]{}'"]+/)
+    .filter(word => word.length > 4)
+    .filter(word => !['based', 'about', 'which', 'their', 'there', 'these', 'those', 'would', 'could', 'should'].includes(word));
+  
+  for (const slideNum of citations) {
+    const slideText = slideMap.get(slideNum);
+    
+    if (!slideText) {
+      warnings.push(`⚠️ Slide ${slideNum} was cited but not in context`);
+      continue;
+    }
+    
+    // Check if significant words from answer appear in slide
+    let matchCount = 0;
+    const matchedWords = [];
+    
+    for (const word of answerWords) {
+      if (slideText.includes(word)) {
+        matchCount++;
+        matchedWords.push(word);
+      }
+    }
+    
+    // Require at least 30% of answer words to be in the slide, or at least 3 matches
+    const matchRatio = answerWords.length > 0 ? matchCount / answerWords.length : 0;
+    
+    if (matchRatio >= 0.3 || matchCount >= 3) {
+      validatedCitations.push(slideNum);
+    } else {
+      warnings.push(`⚠️ Citation [Slide ${slideNum}] could not be fully verified (${matchCount}/${answerWords.length} terms matched)`);
+      // Still include citation but with warning
+      validatedCitations.push(slideNum);
     }
   }
   
-  // If no citations found in text, use all relevant slides
-  if (citations.size === 0) {
-    relevantSlides.forEach(slide => citations.add(slide.slideNumber));
-  }
+  return { validatedCitations, warnings };
+}
+
+/**
+ * Parse JSON response from the model, handling potential formatting issues
+ * @param {string} responseText - The raw response from the model
+ * @returns {{answer: string, citations: number[], confidence: string}}
+ */
+function parseStructuredResponse(responseText) {
+  // Default response if parsing fails
+  const defaultResponse = {
+    answer: responseText,
+    citations: [],
+    confidence: 'low'
+  };
   
-  return Array.from(citations).sort((a, b) => a - b);
+  try {
+    // Try to extract JSON from the response
+    let jsonStr = responseText.trim();
+    
+    // Remove markdown code blocks if present
+    if (jsonStr.startsWith('```')) {
+      jsonStr = jsonStr.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
+    }
+    
+    // Find JSON object in the response
+    const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      jsonStr = jsonMatch[0];
+    }
+    
+    const parsed = JSON.parse(jsonStr);
+    
+    return {
+      answer: parsed.answer || responseText,
+      citations: Array.isArray(parsed.citations) ? parsed.citations.map(n => parseInt(n, 10)).filter(n => !isNaN(n)) : [],
+      confidence: ['high', 'medium', 'low', 'none'].includes(parsed.confidence) ? parsed.confidence : 'low'
+    };
+  } catch (error) {
+    console.warn('Failed to parse structured response, using fallback extraction');
+    
+    // Fallback: try to extract citations from text
+    const citationMatch = responseText.match(/\[Slides?\s*([\d,\s]+)\]/gi);
+    const citations = [];
+    if (citationMatch) {
+      citationMatch.forEach(match => {
+        const nums = match.match(/\d+/g);
+        if (nums) {
+          nums.forEach(n => citations.push(parseInt(n, 10)));
+        }
+      });
+    }
+    
+    return {
+      ...defaultResponse,
+      citations: [...new Set(citations)]
+    };
+  }
 }
 
 /**
  * Generate an answer using OpenAI based on retrieved slides
  * @param {string} query - The user's question
  * @param {Array<{slideNumber: number, text: string, similarity: number}>} relevantSlides - Retrieved slides
- * @returns {Promise<{answer: string, citations: number[]}>}
+ * @returns {Promise<{answer: string, citations: number[], confidence: string, warnings: string[]}>}
  */
 async function generateAnswer(query, relevantSlides) {
   // Build context from slides
@@ -108,7 +202,7 @@ ${context}
 
 Student's Question: ${query}
 
-Please answer based ONLY on the information provided in the slides above.`;
+Remember: Respond with ONLY a JSON object containing "answer", "citations", and "confidence".`;
 
   try {
     const response = await openai.chat.completions.create({
@@ -121,12 +215,48 @@ Please answer based ONLY on the information provided in the slides above.`;
       max_tokens: 1000
     });
     
-    const answer = response.choices[0].message.content.trim();
-    const citations = extractCitations(answer, relevantSlides);
+    const responseText = response.choices[0].message.content.trim();
+    
+    // Parse structured response
+    const { answer, citations, confidence } = parseStructuredResponse(responseText);
+    
+    // Validate citations
+    const { validatedCitations, warnings } = validateCitations(answer, citations, relevantSlides);
+    
+    // Add warning if confidence is none but citations exist
+    if (confidence === 'none' && validatedCitations.length > 0) {
+      warnings.push('⚠️ Model indicates low confidence but provided citations');
+    }
+    
+    // Add warning if "cannot answer" but has citations
+    const cannotAnswerPhrases = [
+      'cannot answer',
+      'can\'t answer',
+      'نمی‌توانم پاسخ',
+      'امکان پاسخ',
+      'not in the slides',
+      'not found in'
+    ];
+    
+    const seemsLikeRefusal = cannotAnswerPhrases.some(phrase => 
+      answer.toLowerCase().includes(phrase.toLowerCase())
+    );
+    
+    if (seemsLikeRefusal && validatedCitations.length > 0) {
+      // Clear citations if it's a refusal
+      return {
+        answer,
+        citations: [],
+        confidence: 'none',
+        warnings: []
+      };
+    }
     
     return {
       answer,
-      citations
+      citations: validatedCitations,
+      confidence,
+      warnings
     };
   } catch (error) {
     console.error('Error generating answer:', error);
@@ -138,7 +268,7 @@ Please answer based ONLY on the information provided in the slides above.`;
  * Main RAG function: retrieve and generate
  * @param {string} query - The user's question
  * @param {number} topK - Number of slides to retrieve
- * @returns {Promise<{answer: string, citations: number[], relevantSlides: Array}>}
+ * @returns {Promise<{answer: string, citations: number[], confidence: string, warnings: string[], relevantSlides: Array}>}
  */
 async function askQuestion(query, topK = 3) {
   // Ensure vector store is loaded
@@ -151,16 +281,28 @@ async function askQuestion(query, topK = 3) {
     return {
       answer: 'I cannot answer based on the provided material. No relevant slides were found.',
       citations: [],
+      confidence: 'none',
+      warnings: [],
       relevantSlides: []
     };
   }
   
+  // Check if any slides have reasonable similarity
+  const maxSimilarity = Math.max(...relevantSlides.map(s => s.similarity));
+  const warnings = [];
+  
+  if (maxSimilarity < 0.3) {
+    warnings.push('⚠️ Low relevance: No slides closely match your question');
+  }
+  
   // Generate answer
-  const { answer, citations } = await generateAnswer(query, relevantSlides);
+  const result = await generateAnswer(query, relevantSlides);
   
   return {
-    answer,
-    citations,
+    answer: result.answer,
+    citations: result.citations,
+    confidence: result.confidence,
+    warnings: [...warnings, ...result.warnings],
     relevantSlides: relevantSlides.map(s => ({
       slideNumber: s.slideNumber,
       similarity: s.similarity
@@ -173,5 +315,6 @@ module.exports = {
   generateAnswer,
   askQuestion,
   buildContext,
-  extractCitations
+  validateCitations,
+  parseStructuredResponse
 };
