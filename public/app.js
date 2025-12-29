@@ -1,5 +1,6 @@
 /**
  * RAG Teaching Assistant - Frontend JavaScript
+ * Intelligent Version with Multi-Query & Re-Ranking
  */
 
 // DOM Elements
@@ -14,12 +15,20 @@ const confidenceBadge = document.getElementById('confidenceBadge');
 const warningsSection = document.getElementById('warningsSection');
 const warningsList = document.getElementById('warningsList');
 
+// Session management
+let sessionId = localStorage.getItem('sessionId') || generateSessionId();
+localStorage.setItem('sessionId', sessionId);
+
+function generateSessionId() {
+    return 'session_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
+}
+
 // Confidence level labels and colors
 const confidenceLabels = {
-    high: { text: 'بالا / High', class: 'confidence-high' },
-    medium: { text: 'متوسط / Medium', class: 'confidence-medium' },
-    low: { text: 'پایین / Low', class: 'confidence-low' },
-    none: { text: 'یافت نشد / Not Found', class: 'confidence-none' }
+    high: { text: '🟢 بالا / High', class: 'confidence-high' },
+    medium: { text: '🟡 متوسط / Medium', class: 'confidence-medium' },
+    low: { text: '🟠 پایین / Low', class: 'confidence-low' },
+    none: { text: '🔴 یافت نشد / Not Found', class: 'confidence-none' }
 };
 
 /**
@@ -40,13 +49,17 @@ async function askQuestion() {
     hideAnswer();
 
     try {
-        // Send request to API
+        // Send request to API with intelligent mode enabled
         const response = await fetch('/api/ask', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
             },
-            body: JSON.stringify({ question }),
+            body: JSON.stringify({ 
+                question,
+                sessionId,
+                useIntelligent: true  // Use new intelligent RAG
+            }),
         });
 
         const data = await response.json();
@@ -74,14 +87,56 @@ async function askQuestion() {
  * Display the answer and citations
  */
 function displayAnswer(data) {
-    // Show answer text
-    answerText.textContent = data.answer;
+    // Format answer with markdown-like styling
+    let formattedAnswer = data.answer;
+    
+    // Convert markdown-style formatting to HTML
+    formattedAnswer = formattedAnswer
+        .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\*(.*?)\*/g, '<em>$1</em>')
+        .replace(/^- (.*)$/gm, '• $1')
+        .replace(/^(\d+)\. (.*)$/gm, '$1. $2')
+        .replace(/\n/g, '<br>');
+    
+    answerText.innerHTML = formattedAnswer;
 
     // Show confidence badge
     const confidence = data.confidence || 'low';
     const confInfo = confidenceLabels[confidence] || confidenceLabels.low;
     confidenceBadge.textContent = confInfo.text;
     confidenceBadge.className = `confidence-badge ${confInfo.class}`;
+
+    // Show key points if available
+    if (data.keyPoints && data.keyPoints.length > 0) {
+        const keyPointsDiv = document.createElement('div');
+        keyPointsDiv.className = 'key-points';
+        keyPointsDiv.innerHTML = `
+            <h4>📌 نکات کلیدی / Key Points:</h4>
+            <ul>
+                ${data.keyPoints.map(point => `<li>${point}</li>`).join('')}
+            </ul>
+        `;
+        answerText.appendChild(keyPointsDiv);
+    }
+
+    // Show additional notes if available
+    if (data.additionalNotes) {
+        const notesDiv = document.createElement('div');
+        notesDiv.className = 'additional-notes';
+        notesDiv.innerHTML = `
+            <h4>📚 برای مطالعه بیشتر / Additional Notes:</h4>
+            <p>${data.additionalNotes}</p>
+        `;
+        answerText.appendChild(notesDiv);
+    }
+
+    // Show response time
+    if (data.responseTime) {
+        const timeDiv = document.createElement('div');
+        timeDiv.className = 'response-time';
+        timeDiv.innerHTML = `⏱️ زمان پاسخ: ${data.responseTime}ms`;
+        answerText.appendChild(timeDiv);
+    }
 
     // Show warnings if any
     warningsList.innerHTML = '';
@@ -103,22 +158,22 @@ function displayAnswer(data) {
         data.citations.forEach(slideNum => {
             const badge = document.createElement('span');
             badge.className = 'citation-badge';
-            badge.textContent = `اسلاید ${slideNum} / Slide ${slideNum}`;
+            badge.textContent = `📄 اسلاید ${slideNum}`;
             citationsList.appendChild(badge);
         });
     } else {
         citationsList.innerHTML = '<span style="color: #999;">بدون منبع / No citations</span>';
     }
 
-    // Show similarity scores (optional details)
+    // Show similarity scores with document names
     similarityList.innerHTML = '';
     if (data.relevantSlides && data.relevantSlides.length > 0) {
         data.relevantSlides.forEach(slide => {
             const li = document.createElement('li');
-            const similarity = (slide.similarity * 100).toFixed(1);
+            const docName = slide.documentName ? ` (${slide.documentName.substring(0, 30)}...)` : '';
             li.innerHTML = `
-                <span>اسلاید ${slide.slideNumber}</span>
-                <span>شباهت: ${similarity}%</span>
+                <span>📑 اسلاید ${slide.slideNumber}${docName}</span>
+                <span class="preview">${slide.preview || ''}</span>
             `;
             similarityList.appendChild(li);
         });
@@ -135,8 +190,10 @@ function setLoading(isLoading) {
     askBtn.disabled = isLoading;
     if (isLoading) {
         askBtn.classList.add('loading');
+        askBtn.textContent = '🔄 در حال پردازش...';
     } else {
         askBtn.classList.remove('loading');
+        askBtn.textContent = '🚀 پرسش / Ask';
     }
 }
 
@@ -167,6 +224,24 @@ function hideAnswer() {
  */
 function toggleLanguage() {
     document.body.classList.toggle('ltr');
+}
+
+/**
+ * Clear conversation history
+ */
+async function clearHistory() {
+    try {
+        await fetch('/api/ask/clear-history', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sessionId })
+        });
+        sessionId = generateSessionId();
+        localStorage.setItem('sessionId', sessionId);
+        alert('تاریخچه پاک شد / History cleared');
+    } catch (error) {
+        console.error('Error clearing history:', error);
+    }
 }
 
 /**

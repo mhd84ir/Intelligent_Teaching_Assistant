@@ -1,6 +1,14 @@
 require('dotenv').config();
 const OpenAI = require('openai');
-const { getEmbedding, findSimilarSlides, loadVectorStore, cosineSimilarity } = require('./embeddingService');
+const { 
+  getEmbedding, 
+  findSimilarSlides, 
+  loadVectorStore, 
+  cosineSimilarity,
+  findSimilarSlidesInKnowledge,
+  loadKnowledgeVectorStore,
+  getKnowledgeStats
+} = require('./embeddingService');
 
 // Configuration from environment
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
@@ -42,30 +50,45 @@ ADDITIONAL RULES:
 RESPOND WITH ONLY THE JSON OBJECT, NO OTHER TEXT.`;
 
 /**
- * Retrieve relevant slides for a query
+ * Retrieve relevant slides for a query (supports both legacy and knowledge base)
  * @param {string} query - The user's question
  * @param {number} topK - Number of slides to retrieve
- * @returns {Promise<Array<{slideNumber: number, text: string, similarity: number}>>}
+ * @param {boolean} useKnowledgeBase - Use multi-document knowledge base
+ * @returns {Promise<Array<{slideNumber: number, text: string, similarity: number, documentName?: string}>>}
  */
-async function retrieveRelevantSlides(query, topK = 3) {
+async function retrieveRelevantSlides(query, topK = 5, useKnowledgeBase = true) {
   // Generate embedding for the query
   const queryEmbedding = await getEmbedding(query);
   
-  // Find similar slides
+  // Check knowledge base first
+  if (useKnowledgeBase) {
+    loadKnowledgeVectorStore();
+    const stats = getKnowledgeStats();
+    
+    if (stats.totalSlides > 0) {
+      console.log(`🔍 Searching knowledge base (${stats.totalSlides} slides from ${stats.totalDocuments} documents)`);
+      const similarSlides = findSimilarSlidesInKnowledge(queryEmbedding, topK);
+      return similarSlides;
+    }
+  }
+  
+  // Fallback to legacy vector store
+  console.log('🔍 Searching legacy vector store');
   const similarSlides = findSimilarSlides(queryEmbedding, topK);
   
   return similarSlides;
 }
 
 /**
- * Build the context string from relevant slides
- * @param {Array<{slideNumber: number, text: string}>} slides 
+ * Build the context string from relevant slides (supports multi-document)
+ * @param {Array<{slideNumber: number, text: string, documentName?: string}>} slides 
  * @returns {string}
  */
 function buildContext(slides) {
-  return slides.map(slide => 
-    `--- Slide ${slide.slideNumber} ---\n${slide.text}`
-  ).join('\n\n');
+  return slides.map(slide => {
+    const docInfo = slide.documentName ? ` (${slide.documentName})` : '';
+    return `--- Slide ${slide.slideNumber}${docInfo} ---\n${slide.text}`;
+  }).join('\n\n');
 }
 
 /**

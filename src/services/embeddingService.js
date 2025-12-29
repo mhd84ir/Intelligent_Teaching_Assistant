@@ -18,12 +18,20 @@ console.log(`🔗 OpenAI client configured with base URL: ${OPENAI_BASE_URL || '
 
 const DATA_DIR = path.join(__dirname, '../../data');
 const VECTOR_STORE_PATH = path.join(DATA_DIR, 'vectorStore.json');
+const KNOWLEDGE_VECTOR_STORE_PATH = path.join(DATA_DIR, 'knowledgeVectorStore.json');
 
 // Embedding dimensions for text-embedding-3-small
 const EMBEDDING_DIMENSIONS = 1536;
 
 // In-memory vector store
 let vectorStore = [];
+
+// Knowledge vector store (multi-document support)
+let knowledgeVectorStore = {
+  documents: {},  // docId -> { slides: [...], metadata: {...} }
+  allSlides: [],  // Flattened for search
+  lastUpdated: null
+};
 
 /**
  * Generate embedding for a text using OpenAI's embedding model
@@ -179,6 +187,208 @@ async function searchSlides(query, topK = 3) {
   return findSimilarSlides(queryEmbedding, topK);
 }
 
+// ============================================
+// Knowledge Vector Store (Multi-Document Support)
+// ============================================
+
+/**
+ * Add a document to the knowledge vector store
+ * @param {string} docId - Document ID
+ * @param {string} docName - Document filename
+ * @param {Array<{slideNumber: number, text: string}>} slides - Slides array
+ * @param {Function} progressCallback - Optional progress callback
+ * @returns {Promise<number>} Number of slides processed
+ */
+async function addDocumentToKnowledge(docId, docName, slides, progressCallback = null) {
+  const docSlides = [];
+  
+  for (let i = 0; i < slides.length; i++) {
+    const slide = slides[i];
+    
+    if (progressCallback) {
+      progressCallback(i + 1, slides.length, slide.slideNumber);
+    }
+    
+    try {
+      const embedding = await getEmbedding(slide.text);
+      
+      const slideWithEmbedding = {
+        slideNumber: slide.slideNumber,
+        localSlideNumber: slide.localSlideNumber || slide.slideNumber,
+        documentId: docId,
+        documentName: docName,
+        text: slide.text,
+        embedding: embedding
+      };
+      
+      docSlides.push(slideWithEmbedding);
+      
+      // Rate limiting
+      if (i < slides.length - 1) {
+        await sleep(300);
+      }
+    } catch (error) {
+      console.error(`Error embedding slide ${slide.slideNumber}:`, error.message);
+      throw error;
+    }
+  }
+  
+  // Store document slides
+  knowledgeVectorStore.documents[docId] = {
+    slides: docSlides,
+    metadata: {
+      name: docName,
+      slideCount: docSlides.length,
+      addedAt: new Date().toISOString()
+    }
+  };
+  
+  // Rebuild flattened array
+  rebuildAllSlides();
+  
+  return docSlides.length;
+}
+
+/**
+ * Rebuild the flattened allSlides array from documents
+ */
+function rebuildAllSlides() {
+  knowledgeVectorStore.allSlides = [];
+  
+  for (const docId of Object.keys(knowledgeVectorStore.documents)) {
+    const doc = knowledgeVectorStore.documents[docId];
+    knowledgeVectorStore.allSlides.push(...doc.slides);
+  }
+  
+  knowledgeVectorStore.lastUpdated = new Date().toISOString();
+}
+
+/**
+ * Remove a document from knowledge vector store
+ * @param {string} docId - Document ID to remove
+ * @returns {boolean} True if removed
+ */
+function removeDocumentFromKnowledge(docId) {
+  if (!knowledgeVectorStore.documents[docId]) {
+    return false;
+  }
+  
+  delete knowledgeVectorStore.documents[docId];
+  rebuildAllSlides();
+  return true;
+}
+
+/**
+ * Find similar slides in knowledge store
+ * @param {number[]} queryEmbedding - Query embedding
+ * @param {number} topK - Number of results
+ * @returns {Array<{slideNumber: number, text: string, similarity: number, documentName: string}>}
+ */
+function findSimilarSlidesInKnowledge(queryEmbedding, topK = 5) {
+  const similarities = knowledgeVectorStore.allSlides.map(slide => ({
+    slideNumber: slide.slideNumber,
+    localSlideNumber: slide.localSlideNumber,
+    documentId: slide.documentId,
+    documentName: slide.documentName,
+    text: slide.text,
+    similarity: cosineSimilarity(queryEmbedding, slide.embedding)
+  }));
+  
+  similarities.sort((a, b) => b.similarity - a.similarity);
+  
+  return similarities.slice(0, topK);
+}
+
+/**
+ * Search knowledge store with text query
+ * @param {string} query - Text query
+ * @param {number} topK - Number of results
+ * @returns {Promise<Array>}
+ */
+async function searchKnowledge(query, topK = 5) {
+  const queryEmbedding = await getEmbedding(query);
+  return findSimilarSlidesInKnowledge(queryEmbedding, topK);
+}
+
+/**
+ * Save knowledge vector store to file
+ */
+function saveKnowledgeVectorStore(filePath = KNOWLEDGE_VECTOR_STORE_PATH) {
+  const outputDir = path.dirname(filePath);
+  if (!fs.existsSync(outputDir)) {
+    fs.mkdirSync(outputDir, { recursive: true });
+  }
+  
+  knowledgeVectorStore.lastUpdated = new Date().toISOString();
+  fs.writeFileSync(filePath, JSON.stringify(knowledgeVectorStore, null, 2), 'utf-8');
+  
+  const totalSlides = knowledgeVectorStore.allSlides.length;
+  const totalDocs = Object.keys(knowledgeVectorStore.documents).length;
+  console.log(`💾 Knowledge vector store saved: ${totalDocs} documents, ${totalSlides} slides`);
+}
+
+/**
+ * Load knowledge vector store from file
+ * @returns {boolean} True if loaded
+ */
+function loadKnowledgeVectorStore(filePath = KNOWLEDGE_VECTOR_STORE_PATH) {
+  if (!fs.existsSync(filePath)) {
+    console.log('⚠️ Knowledge vector store not found, starting fresh');
+    knowledgeVectorStore = {
+      documents: {},
+      allSlides: [],
+      lastUpdated: null
+    };
+    return false;
+  }
+  
+  const data = fs.readFileSync(filePath, 'utf-8');
+  knowledgeVectorStore = JSON.parse(data);
+  
+  const totalSlides = knowledgeVectorStore.allSlides.length;
+  const totalDocs = Object.keys(knowledgeVectorStore.documents).length;
+  console.log(`📂 Knowledge vector store loaded: ${totalDocs} documents, ${totalSlides} slides`);
+  
+  return true;
+}
+
+/**
+ * Clear knowledge vector store
+ */
+function clearKnowledgeVectorStore() {
+  knowledgeVectorStore = {
+    documents: {},
+    allSlides: [],
+    lastUpdated: null
+  };
+}
+
+/**
+ * Get knowledge store stats
+ * @returns {Object} Statistics
+ */
+function getKnowledgeStats() {
+  const docs = Object.keys(knowledgeVectorStore.documents).map(docId => ({
+    id: docId,
+    ...knowledgeVectorStore.documents[docId].metadata
+  }));
+  
+  return {
+    totalDocuments: docs.length,
+    totalSlides: knowledgeVectorStore.allSlides.length,
+    documents: docs,
+    lastUpdated: knowledgeVectorStore.lastUpdated
+  };
+}
+
+/**
+ * Get the knowledge vector store
+ * @returns {Object} Knowledge vector store
+ */
+function getKnowledgeVectorStore() {
+  return knowledgeVectorStore;
+}
+
 module.exports = {
   getEmbedding,
   addSlide,
@@ -190,5 +400,16 @@ module.exports = {
   getVectorStore,
   searchSlides,
   sleep,
-  EMBEDDING_DIMENSIONS
+  EMBEDDING_DIMENSIONS,
+  // Knowledge store exports
+  addDocumentToKnowledge,
+  removeDocumentFromKnowledge,
+  findSimilarSlidesInKnowledge,
+  searchKnowledge,
+  saveKnowledgeVectorStore,
+  loadKnowledgeVectorStore,
+  clearKnowledgeVectorStore,
+  getKnowledgeStats,
+  getKnowledgeVectorStore,
+  KNOWLEDGE_VECTOR_STORE_PATH
 };
